@@ -9,6 +9,7 @@ from assignment.agent.base import (
     DEFAULT_COMPACTION_KEEP_RECENT_STEPS,
     DEFAULT_COMPACTION_MAX_TOKENS,
     Agent,
+    format_tool_output,
 )
 from assignment.agent.tools import EXECUTE_TOOL, SEND_MESSAGE_TOOL
 from assignment.env import Environment
@@ -43,11 +44,30 @@ class CodeAgent(Agent):
         self.task = task
         self.submitted_patch = ""
 
-        # TODO(Part 1.3): Make the `execute` and `send_message` tools available
-        # to the agent.
+        self.tools.extend([EXECUTE_TOOL, SEND_MESSAGE_TOOL])
 
-        # TODO(1.1.b): Construct the system prompt and task_prompt. These
-        # should be usable by the `Agent.build_prompt` method.
+        self.system_prompt = (
+            "You are a coding agent tasked with fixing a software issue in a git "
+            "repository. Use the execute tool to inspect the repository, edit "
+            "files, and run relevant tests. Make focused changes that address "
+            "the user's task and follow the repository's conventions. Use the "
+            "send_message tool to communicate progress and results to the user. "
+            "When finished, submit the git patch produced by git diff, along "
+            "with a concise summary of the changes and tests run."
+        )
+        system_information = json.dumps(
+            {
+                "machine": environment.machine,
+                "release": environment.release,
+                "system": environment.system,
+                "version": environment.version,
+            },
+            indent=2,
+        )
+        self.system_prompt += (
+            f"\n\n<system_information>\n{system_information}\n</system_information>"
+        )
+        self.task_prompt = self.task
         # TODO(1.4): If any skills are available to the agent, make their
         # descriptions/metadata available to the agent in the prompt.
 
@@ -56,8 +76,30 @@ class CodeAgent(Agent):
     ) -> list[dict[str, str]]:
         """Execute ``execute`` and ``send_message`` calls in the code sandbox."""
 
-        # TODO(Part 1.3): Parse each call, execute recognized tools, and return
-        # one message per call (there may be multiple tool calls in one agent
-        # response!). Malformed JSON and unknown tools must become recoverable
-        # observations relayed to the agent instead of exceptions.
-        raise NotImplementedError
+        observations = []
+        for call in tool_calls:
+            try:
+                function = call["function"]
+                name = function["name"]
+                arguments = json.loads(function["arguments"])
+                if not isinstance(arguments, dict):
+                    raise ValueError("Tool arguments must be a JSON object.")
+
+                if name == "execute":
+                    content = format_tool_output(self.env.execute(**arguments))
+                elif name == "send_message":
+                    summary = arguments["summary"]
+                    if not isinstance(summary, str):
+                        raise ValueError("The summary must be a string.")
+                    print(summary)
+                    self.finished = True
+                    content = "Message sent."
+                else:
+                    raise ValueError(f"Unknown tool: {name}")
+            except Exception as exc:
+                content = format_tool_output({"error": str(exc)})
+
+            observations.append(
+                {"role": "tool", "tool_call_id": call["id"], "content": content}
+            )
+        return observations

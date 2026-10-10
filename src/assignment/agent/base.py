@@ -150,8 +150,7 @@ class Agent:
         if self.skills:
             self.tools.append(INVOKE_SKILL_TOOL)
 
-        # TODO(1.1.a): Add machinery to maintain agent state as it takes actions
-        # and observes the results.
+        self.messages: list[dict[str, Any]] = []
 
     def load_skills(self, skills_path: Path) -> dict[str, dict[str, str]]:
         """Load the skill folders exposed to this agent."""
@@ -178,7 +177,7 @@ class Agent:
         )
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
+                model=self.model, 
                 messages=messages,
                 tools=self.tools,
                 reasoning_effort="medium",
@@ -218,16 +217,13 @@ class Agent:
         return response.choices[0].message.model_dump(exclude_none=True)
 
     def build_prompt(self) -> list[dict[str, Any]]:
-        # TODO(1.1.a): Construct a sequence of messages that form the language
-        # model prompt. This should include standing instructions, task
-        # specification, prior interaction including observations, reasoning,
-        # and actions from previous turns. Note that this method should be
-        # domain-agnostic and construct the prompt in a way that would apply
-        # to any of the inheriting domain-specific agents.
+        """Combine standing instructions, the task, and interaction history."""
 
-        # You want to be careful about which attributes of the class you modify
-        # here as they may also be handled by the subclasses.
-        raise NotImplementedError
+        return [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": self.task_prompt},
+            *deepcopy(self.messages),
+        ]
 
     def estimate_active_prompt_tokens(self) -> int:
         """Estimate the next prompt, calibrated by the provider's latest usage."""
@@ -323,20 +319,26 @@ class Agent:
         """Run ReAct steps, always saving the trajectory and stopping Modal."""
 
         try:
-            # TODO(1.2) Run the ReAct loop. Orchestrate the sequence of
-            # prompting the language model to produce reasoning and actions,
-            # extracting the tool calls produced by the model, and executing
-            # the tool calls to obtain the agent's observation for the next
-            # step. Ensure you identify when the agent has completed the task
-            # by setting `Agent.finished`. If the agent exceeds the
-            # `step_limit`, raise `StepLimitError`.
+            while not self.finished:
+                if self.steps_taken >= self.step_limit:
+                    raise StepLimitError(
+                        f"Agent exhausted its step limit of {self.step_limit}."
+                    )
 
-            # TODO(2.2) Call `maybe_compact_context()` before each new action
-            # request in your shared loop. It already estimates active tokens
-            # and handles the threshold, and tracks compaction events for
-            # logging.
+                self.maybe_compact_context()
+                message = self.query_language_model()
+                self.messages.append(message)
+                tool_calls = message.get("tool_calls") or []
+                if not tool_calls:
+                    self.messages.append(
+                        {
+                            "role": "user",
+                            "content": "Continue by calling a tool to act on the task.",
+                        }
+                    )
+                    continue
 
-            raise NotImplementedError
+                self.messages.extend(self.execute_tool_calls(tool_calls))
         finally:
             # This block is provided infrastructure. Do not modify it: a
             # trajectory is required even when a run fails.
