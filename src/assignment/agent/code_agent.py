@@ -50,10 +50,11 @@ class CodeAgent(Agent):
             "You are a coding agent tasked with fixing a software issue in a git "
             "repository. Use the execute tool to inspect the repository, edit "
             "files, and run relevant tests. Make focused changes that address "
-            "the user's task and follow the repository's conventions. Use the "
-            "send_message tool to communicate progress and results to the user. "
-            "When finished, submit the git patch produced by git diff, along "
-            "with a concise summary of the changes and tests run."
+            "the user's task and follow the repository's conventions. Use "
+            "ordinary assistant text to report progress. The send_message tool "
+            "is reserved for final submission and ends the run. When finished, "
+            "create and verify the git patch produced by git diff, then call "
+            "send_message with a concise summary of the changes and tests run."
         )
         system_information = json.dumps(
             {
@@ -74,11 +75,13 @@ class CodeAgent(Agent):
     def execute_tool_calls(
         self, tool_calls: list[dict[str, Any]]
     ) -> list[dict[str, str]]:
-        """Execute ``execute`` and ``send_message`` calls in the code sandbox."""
+        """Execute commands, load skills, or validate a final submission."""
 
         observations = []
         for call in tool_calls:
             try:
+                if self.finished:
+                    raise ValueError("The task has already been submitted.")
                 function = call["function"]
                 name = function["name"]
                 arguments = json.loads(function["arguments"])
@@ -87,13 +90,31 @@ class CodeAgent(Agent):
 
                 if name == "execute":
                     content = format_tool_output(self.env.execute(**arguments))
+                elif name == "invoke_skill":
+                    skill_name = arguments["name"]
+                    if not isinstance(skill_name, str) or skill_name not in self.skills:
+                        raise ValueError(f"Unknown skill: {skill_name!r}")
+                    content = self.skills[skill_name]["content"]
                 elif name == "send_message":
                     summary = arguments["summary"]
-                    if not isinstance(summary, str):
-                        raise ValueError("The summary must be a string.")
+                    if not isinstance(summary, str) or not summary.strip():
+                        raise ValueError("The summary must be a non-empty string.")
+                    patch_result = self.env.execute("cat patch.txt")
+                    if patch_result["returncode"] != 0:
+                        raise ValueError(
+                            "Cannot submit: patch.txt could not be read. Create "
+                            "and verify it in the default working directory first."
+                        )
+                    patch = patch_result["output"]
+                    if not patch.strip():
+                        raise ValueError(
+                            "Cannot submit: patch.txt is empty. Finish the fix, "
+                            "then create and verify a non-empty patch first."
+                        )
+                    self.submitted_patch = patch
                     print(summary)
                     self.finished = True
-                    content = "Message sent."
+                    content = "Patch submitted. Task finished."
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             except Exception as exc:

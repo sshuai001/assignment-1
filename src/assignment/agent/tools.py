@@ -86,14 +86,18 @@ SEND_MESSAGE_TOOL = {
     "type": "function",
     "function": {
         "name": "send_message",
-        "description": ("Send a message to the user."),
+        "description": (
+            "Submit the completed coding task and end the run. Use only after "
+            "creating and verifying a non-empty patch.txt in the sandbox's "
+            "default working directory. This is not a progress-reporting tool."
+        ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": ("Content of the message"),
+                    "description": "Final summary of the changes and tests run.",
                 },
             },
             "required": ["summary"],

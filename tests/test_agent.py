@@ -150,12 +150,13 @@ def make_agent(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:0/v1")
 
-    def _make(responses: list[dict]):
+    def _make(responses: list[dict], skills_path: str | None = None):
         agent = CodeAgent(
             TASK,
             FakeEnvironment(),
             model="gpt-4.1",
             logs_save_path=str(tmp_path / "logs.json"),
+            skills_path=skills_path,
         )
         agent.step_limit = len(responses)
 
@@ -169,6 +170,96 @@ def make_agent(monkeypatch, tmp_path):
         return agent, calls
 
     return _make
+
+
+def test_premature_message_recovers_and_submits_patch(make_agent, monkeypatch):
+    """An initial progress message cannot end the run before work is done."""
+    patch_command = ACTIONS[3][1]
+    agent, calls = make_agent(
+        [
+            make_raw_action("call_progress", "send_message", json.dumps({"summary": "I'll inspect the code."})),
+            make_action("call_patch", patch_command),
+            make_action("call_verify", "cat patch.txt"),
+            make_raw_action("call_submit", "send_message", json.dumps({"summary": "Fixed and tested."})),
+        ]
+    )
+    execute = agent.env.execute
+
+    def execute_with_missing_patch(command, **kwargs):
+        patch_exists = patch_command in agent.env.commands
+        result = execute(command, **kwargs)
+        if command == "cat patch.txt" and not patch_exists:
+            return {"output": "cat: patch.txt: No such file or directory", "returncode": 1}
+        return result
+
+    monkeypatch.setattr(agent.env, "execute", execute_with_missing_patch)
+    agent.run()
+
+    assert len(calls) == 4
+    assert "Cannot submit" in as_text(calls[1]["messages"])
+    assert patch_command in agent.env.commands
+    assert agent.finished
+    assert agent.submitted_patch == OUTPUTS["cat patch.txt"]
+
+
+@pytest.mark.parametrize(
+    "patch_result",
+    [
+        {"output": "No such file", "returncode": 1},
+        {"output": " \n", "returncode": 0},
+    ],
+)
+def test_invalid_patch_keeps_agent_working(make_agent, monkeypatch, patch_result):
+    agent, calls = make_agent(
+        [
+            make_raw_action("call_submit", "send_message", json.dumps({"summary": "Done."})),
+            make_action("call_continue", "ls -la"),
+        ]
+    )
+    execute = agent.env.execute
+
+    def execute_with_invalid_patch(command, **kwargs):
+        result = execute(command, **kwargs)
+        return patch_result if command == "cat patch.txt" else result
+
+    monkeypatch.setattr(agent.env, "execute", execute_with_invalid_patch)
+    with pytest.raises(StepLimitError):
+        agent.run()
+
+    assert len(calls) == 2
+    assert "Cannot submit" in as_text(calls[1]["messages"])
+    assert "ls -la" in agent.env.commands
+    assert not agent.finished
+    assert not agent.submitted_patch
+
+
+def test_no_commands_execute_after_submission_in_same_batch(make_agent):
+    submission = make_raw_action("call_submit", "send_message", json.dumps({"summary": "Done."}))
+    submission["tool_calls"].extend(make_action("call_late", "ls -la")["tool_calls"])
+    agent, calls = make_agent([submission])
+
+    agent.run()
+
+    assert len(calls) == 1
+    assert agent.finished
+    assert agent.env.commands == ["cat patch.txt"]
+    assert "already been submitted" in as_text(agent.messages)
+
+
+def test_invoke_submission_skill_returns_instructions_and_continues(make_agent):
+    agent, calls = make_agent(
+        [
+            make_raw_action("call_skill", "invoke_skill", json.dumps({"name": "submit-task"})),
+            make_action("call_continue", "ls -la"),
+        ],
+        skills_path="./tasks/code-skills/",
+    )
+    with pytest.raises(StepLimitError):
+        agent.run()
+
+    assert agent.skills["submit-task"]["content"] in as_text(calls[1]["messages"])
+    assert agent.env.commands == ["ls -la"]
+    assert not agent.finished
 
 
 def test_prompt_carries_task_action_and_result(make_agent):
